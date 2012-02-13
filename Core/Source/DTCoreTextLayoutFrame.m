@@ -15,6 +15,9 @@
 #import "UIDevice+DTVersion.h"
 
 #import "NSString+Paragraphs.h"
+#import "DTColor+HTML.h"
+#import "DTImage+HTML.h"
+
 
 // global flag that shows debug frames
 static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
@@ -22,17 +25,17 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 
 @implementation DTCoreTextLayoutFrame
 {
-	CGRect _frame;
+//	CGRect _frame;
 	CTFrameRef _textFrame;
     CTFramesetterRef _framesetter;
     
-	NSArray *_lines;
-	NSArray *_paragraphRanges;
+//	NSArray *_lines;
+//	NSArray *_paragraphRanges;
 	
     NSInteger tag;
 	
-	NSArray *_textAttachments;
-	NSAttributedString *_attributedStringFragment;
+//	NSArray *_textAttachments;
+//	NSAttributedString *_attributedStringFragment;
 }
 
 + (void)setShouldDrawDebugFrames:(BOOL)debugFrames
@@ -196,7 +199,6 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 	return tmpArray;
 }
 
-#if 0 // appears to be unused
 - (NSArray *)linesContainedInRect:(CGRect)rect
 {
 	NSMutableArray *tmpArray = [NSMutableArray arrayWithCapacity:[self.lines count]];
@@ -221,7 +223,6 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 	
 	return tmpArray;
 }
-#endif
 
 - (CGPathRef)path
 {
@@ -230,7 +231,7 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 
 - (void)setShadowInContext:(CGContextRef)context fromDictionary:(NSDictionary *)dictionary
 {
-	UIColor *color = [dictionary objectForKey:@"Color"];
+	DTColor *color = [dictionary objectForKey:@"Color"];
 	CGSize offset = [[dictionary objectForKey:@"Offset"] CGSizeValue];
 	CGFloat blur = [[dictionary objectForKey:@"Blur"] floatValue];
 	
@@ -491,7 +492,7 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 					{
 						if (attachment.contentType == DTTextAttachmentTypeImage)
 						{
-							UIImage *image = (id)attachment.contents;
+							DTImage *image = (id)attachment.contents;
 							
 							CGPoint origin = oneRun.frame.origin;
 							origin.y = self.frame.size.height - origin.y - oneRun.ascent;
@@ -654,7 +655,6 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 	return nil;
 }
 
-#if 0 // apparently unused
 - (NSArray *)linesInParagraphAtIndex:(NSUInteger)index
 {
 	NSArray *paragraphRanges = self.paragraphRanges;
@@ -697,7 +697,6 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 		return nil;
 	}
 }
-#endif
 
 #pragma mark Paragraphs
 - (NSUInteger)paragraphIndexContainingStringIndex:(NSUInteger)stringIndex
@@ -780,20 +779,27 @@ static BOOL _DTCoreTextLayoutFramesShouldDrawDebugFrames = NO;
 		
 		if (previousLine)
 		{
-			float paragraphSpacing = [previousLine paragraphSpacing];
-			float lineHeight = [currentLine lineHeight];
-			if (paragraphSpacing > 0) {
-				paragraphSpacing = MIN(paragraphSpacing, [currentLine paragraphSpacing:NO]);
-			} 
-			currentOrigin.y = previousLineOrigin.y + lineHeight + paragraphSpacing;
+			CGFloat lineHeightMultiplier = [previousLine calculatedLineHeightMultiplier];
+			// TODO: correct spacing between paragraphs with line height multiplier > 1
 			
+			CGFloat spaceAfterPreviousLine = [previousLine paragraphSpacing:YES]; // already multiplied
+			CGFloat lineHeight = previousLine.descent + currentLine.ascent + currentLine.leading;
+			
+			if (spaceAfterPreviousLine > 0) {
+				// last paragraph, don't use line multiplier on current line values, use space specified
+				lineHeight += spaceAfterPreviousLine + previousLine.descent * (lineHeightMultiplier-1.);
+			} else {
+				// apply multiplier
+				lineHeight *= lineHeightMultiplier;
+			}
+						
+			// space the current line baseline lineHeight px from previous line
+			currentOrigin.y = roundf(previousLineOrigin.y + lineHeight); 
 			currentOrigin.x = currentLine.baselineOrigin.x;
 			
-			previousLineOrigin = currentOrigin;
-			
-			currentOrigin.y = roundf(currentOrigin.y);
-			
 			currentLine.baselineOrigin = currentOrigin;
+			
+			previousLineOrigin = currentOrigin;
 		}
 		
 		previousLine = currentLine;

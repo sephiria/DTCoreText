@@ -9,15 +9,22 @@
 #import "DTHTMLElement.h"
 #import "DTCoreTextParagraphStyle.h"
 #import "DTCoreTextFontDescriptor.h"
-#import "NSAttributedStringRunDelegates.h"
 #import "NSString+HTML.h"
-#import "UIColor+HTML.h"
+#import "DTColor+HTML.h"
 #import "NSCharacterSet+HTML.h"
 #import "DTTextAttachment.h"
 #import "NSAttributedString+HTML.h"
 #import "NSMutableAttributedString+HTML.h"
 
 #import "DTCSSListStyle.h"
+
+#import "DTCoreTextConstants.h"
+#import "DTImage+HTML.h"
+#import "DTColor+HTML.h"
+
+#if TARGET_OS_IPHONE
+#import "NSAttributedStringRunDelegates.h"
+#endif
 
 @interface DTHTMLElement ()
 
@@ -31,52 +38,51 @@
 
 @implementation DTHTMLElement
 {
-	__unsafe_unretained DTHTMLElement *parent;
+	DTHTMLElement *parent;
 	
-    DTCoreTextFontDescriptor *fontDescriptor;
-    DTCoreTextParagraphStyle *paragraphStyle;
-    DTTextAttachment *textAttachment;
-    NSURL *link;
-    
-    UIColor *_textColor;
-	UIColor *backgroundColor;
-    
-    CTUnderlineStyle underlineStyle;
-    
-    NSString *tagName;
-    NSString *text;
-    
-    BOOL tagContentInvisible;
-    BOOL strikeOut;
-    NSInteger superscriptStyle;
-    
-    NSInteger headerLevel;
-    
-    NSArray *shadows;
-    
-    NSMutableDictionary *_fontCache;
-    
-    NSInteger _isInline;
-    NSInteger _isMeta;
+	DTCoreTextFontDescriptor *fontDescriptor;
+	DTCoreTextParagraphStyle *paragraphStyle;
+	DTTextAttachment *_textAttachment;
+	DTTextAttachmentVerticalAlignment _textAttachmentAlignment;
+	NSURL *link;
+	
+	DTColor *_textColor;
+	DTColor *backgroundColor;
+	
+	CTUnderlineStyle underlineStyle;
+	
+	NSString *tagName;
+	NSString *text;
+	
+	BOOL tagContentInvisible;
+	BOOL strikeOut;
+	NSInteger superscriptStyle;
+	
+	NSInteger headerLevel;
+	
+	NSArray *shadows;
+	
+	NSMutableDictionary *_fontCache;
 	
 	NSMutableDictionary *_additionalAttributes;
 	
+	DTHTMLElementDisplayStyle _displayStyle;
 	DTHTMLElementFloatStyle floatStyle;
-    DTCSSListStyle *_listStyle;
-    
+	DTCSSListStyle *_listStyle;
+	
 	BOOL isColorInherited;
 	
 	BOOL preserveNewlines;
 	
 	DTHTMLElementFontVariant fontVariant;
-    
-    CGFloat textScale;
-    CGSize size;
-    
-    NSInteger _listDepth;
-    NSInteger _listCounter;
-    
-    NSMutableArray *_children;
+	
+	CGFloat textScale;
+	CGSize size;
+	
+	NSInteger _listDepth;
+	NSInteger _listCounter;
+	
+	NSMutableArray *_children;
 	NSDictionary *_attributes; // contains all attributes from parsing
 }
 
@@ -85,8 +91,6 @@
 	self = [super init];
 	if (self)
 	{
-		_isInline = -1;
-		_isMeta = -1;
 		_listDepth = -1;
 		_listCounter = NSIntegerMin;
 	}
@@ -107,15 +111,16 @@
 	}
 	
 	// add text attachment
-	if (textAttachment)
+	if (_textAttachment)
 	{
-		// need run delegate for sizing
-		CTRunDelegateRef embeddedObjectRunDelegate = createEmbeddedObjectRunDelegate(textAttachment);
+#if TARGET_OS_IPHONE
+		// need run delegate for sizing (only supported on iOS)
+		CTRunDelegateRef embeddedObjectRunDelegate = createEmbeddedObjectRunDelegate(_textAttachment);
 		[tmpDict setObject:CFBridgingRelease(embeddedObjectRunDelegate) forKey:(id)kCTRunDelegateAttributeName];
-		//CFRelease(embeddedObjectRunDelegate);
-		
+#endif		
+	
 		// add attachment
-		[tmpDict setObject:textAttachment forKey:@"DTTextAttachment"];
+		[tmpDict setObject:_textAttachment forKey:NSAttachmentAttributeName];
 		
 		// remember original paragraphSpacing
 		[tmpDict setObject:[NSNumber numberWithFloat:self.paragraphStyle.paragraphSpacing] forKey:@"DTAttachmentParagraphSpacing"];
@@ -130,7 +135,7 @@
 	if (shouldAddFont)
 	{
 		// try font cache first
-		NSNumber *key = [NSNumber numberWithInt:[fontDescriptor hash]];
+		NSNumber *key = [NSNumber numberWithUnsignedInteger:[fontDescriptor hash]];
 		CTFontRef font = (__bridge CTFontRef)[self.fontCache objectForKey:key];
 		
 		if (!font)
@@ -147,6 +152,9 @@
 		{
 			// __bridge since its already retained elsewhere
 			[tmpDict setObject:(__bridge id)(font) forKey:(id)kCTFontAttributeName];
+			
+			// use this font to adjust the values needed for the run delegate during layout time
+			[_textAttachment adjustVerticalAlignmentForFont:font];
 		}
 	}
 	
@@ -171,7 +179,7 @@
 		[tmpDict setObject:[NSNumber numberWithInteger:underlineStyle] forKey:(id)kCTUnderlineStyleAttributeName];
 		
 		// we could set an underline color as well if we wanted, but not supported by HTML
-		//      [attributes setObject:(id)[UIColor redColor].CGColor forKey:(id)kCTUnderlineColorAttributeName];
+		//      [attributes setObject:(id)[DTImage redColor].CGColor forKey:(id)kCTUnderlineColorAttributeName];
 	}
 	
 	if (_textColor)
@@ -186,19 +194,7 @@
 	
 	if (superscriptStyle)
 	{
-		[tmpDict setObject:(id)[NSNumber numberWithInt:superscriptStyle] forKey:(id)kCTSuperscriptAttributeName];
-	}
-	
-	// correct spacing to match current font size
-	if (self.paragraphStyle.paragraphSpacing>0)
-	{
-		self.paragraphStyle.paragraphSpacing = self.fontDescriptor.pointSize;
-	}
-	
-	// correct spacing to match current font size
-	if (self.paragraphStyle.paragraphSpacingBefore>0)
-	{
-		self.paragraphStyle.paragraphSpacingBefore = self.fontDescriptor.pointSize;
+		[tmpDict setObject:(id)[NSNumber numberWithInteger:superscriptStyle] forKey:(id)kCTSuperscriptAttributeName];
 	}
 	
 	// add paragraph style
@@ -233,25 +229,10 @@
 {
 	NSDictionary *attributes = [self attributesDictionary];
 	
-	if (textAttachment)
+	if (_textAttachment)
 	{
 		// ignore text, use unicode object placeholder
 		NSMutableAttributedString *tmpString = [[NSMutableAttributedString alloc] initWithString:UNICODE_OBJECT_PLACEHOLDER attributes:attributes];
-		
-		BOOL needsNewLineAfter = ![self isContainedInBlockElement];
-		
-#if ALLOW_IPHONE_SPECIAL_CASES
-		// workaround, make float images blocks because we have no float
-		if (floatStyle || textAttachment.displaySize.height > 2.0 * fontDescriptor.pointSize)
-		{
-			needsNewLineAfter = YES;
-		}
-#endif
-		
-		if (needsNewLineAfter)
-		{
-			[tmpString appendNakedString:@"\n"];
-		}
 		
 		return tmpString;
 	}
@@ -321,11 +302,11 @@
 	
 	if (prefix)
 	{
-		UIImage *image = nil;
+		DTImage *image = nil;
 		
 		if (calculatedListStyle.imageName)
 		{
-			image = [UIImage imageNamed:calculatedListStyle.imageName];
+			image = [DTImage imageNamed:calculatedListStyle.imageName];
 			
 			if (!image)
 			{
@@ -347,13 +328,14 @@
 			attachment.contentType = DTTextAttachmentTypeImage;
 			attachment.displaySize = image.size;
 			
+#if TARGET_OS_IPHONE
 			// need run delegate for sizing
 			CTRunDelegateRef embeddedObjectRunDelegate = createEmbeddedObjectRunDelegate(attachment);
 			[attributes setObject:CFBridgingRelease(embeddedObjectRunDelegate) forKey:(id)kCTRunDelegateAttributeName];
-			//CFRelease(embeddedObjectRunDelegate);
+#endif
 			
 			// add attachment
-			[attributes setObject:attachment forKey:@"DTTextAttachment"];				
+			[attributes setObject:attachment forKey:NSAttachmentAttributeName];				
 			
 			if (calculatedListStyle.position == DTCSSListStylePositionInside)
 			{
@@ -433,13 +415,13 @@
 	NSString *color = [styles objectForKey:@"color"];
 	if (color)
 	{
-		self.textColor = [UIColor colorWithHTMLName:color];       
+		self.textColor = [DTColor colorWithHTMLName:color];       
 	}
 	
 	NSString *bgColor = [styles objectForKey:@"background-color"];
 	if (bgColor)
 	{
-		self.backgroundColor = [UIColor colorWithHTMLName:bgColor];       
+		self.backgroundColor = [DTColor colorWithHTMLName:bgColor];       
 	}
 	
 	NSString *floatString = [styles objectForKey:@"float"];
@@ -620,6 +602,27 @@
 		}
 	}
 	
+	NSString *verticalAlignment = [[styles objectForKey:@"vertical-align"] lowercaseString];
+	if (verticalAlignment)
+	{
+		if ([verticalAlignment isEqualToString:@"sub"])
+		{
+			self.superscriptStyle = -1;
+		}
+		else if ([verticalAlignment isEqualToString:@"super"])
+		{
+			self.superscriptStyle = +1;
+		}
+		else if ([verticalAlignment isEqualToString:@"baseline"])
+		{
+			self.superscriptStyle = 0;
+		}
+		else if ([verticalAlignment isEqualToString:@"inherit"])
+		{
+			// nothing to do
+		}
+	}
+	
 	NSString *shadow = [styles objectForKey:@"text-shadow"];
 	if (shadow)
 	{
@@ -650,6 +653,19 @@
 		}
 	}
 	
+	NSString *marginBottom = [styles objectForKey:@"margin-bottom"];
+	if (marginBottom) 
+	{
+		self.paragraphStyle.paragraphSpacing = [marginBottom pixelSizeOfCSSMeasureRelativeToCurrentTextSize:fontDescriptor.pointSize];
+	}
+	else
+	{
+		NSString *webkitMarginAfter = [styles objectForKey:@"-webkit-margin-after"];
+		if (webkitMarginAfter) 
+		{
+			self.paragraphStyle.paragraphSpacing = [webkitMarginAfter pixelSizeOfCSSMeasureRelativeToCurrentTextSize:fontDescriptor.pointSize];
+		}
+	}
 	NSString *fontVariantStr = [[styles objectForKey:@"font-variant"] lowercaseString];
 	if (fontVariantStr)
 	{
@@ -682,6 +698,63 @@
 	{
 		size.height = [heightString pixelSizeOfCSSMeasureRelativeToCurrentTextSize:self.fontDescriptor.pointSize];
 	}
+	
+	NSString *whitespaceString = [styles objectForKey:@"white-space"];
+	if ([whitespaceString hasPrefix:@"pre"])
+	{
+		preserveNewlines = YES;
+	}
+	else
+	{
+		preserveNewlines = NO;
+	}
+	
+	NSString *displayString = [styles objectForKey:@"display"];
+	if (displayString)
+	{
+		if ([displayString isEqualToString:@"none"])
+		{
+			_displayStyle = DTHTMLElementDisplayStyleNone;
+		}
+		else if ([displayString isEqualToString:@"block"])
+		{
+			_displayStyle = DTHTMLElementDisplayStyleBlock;
+		}
+		else if ([displayString isEqualToString:@"inline"])
+		{
+			_displayStyle = DTHTMLElementDisplayStyleInline;
+		}
+		else if ([displayString isEqualToString:@"list-item"])
+		{
+			_displayStyle = DTHTMLElementDisplayStyleListItem;
+		}
+		else if ([verticalAlignment isEqualToString:@"inherit"])
+		{
+			// nothing to do
+		}
+	}
+	
+	// only works for objects!
+	NSString *verticalAlignString = [styles objectForKey:@"vertical-align"];
+	if (verticalAlignString)
+	{
+		if ([verticalAlignString isEqualToString:@"text-top"])
+		{
+			_textAttachmentAlignment = DTTextAttachmentVerticalAlignmentTop;
+		}
+		else if ([verticalAlignString isEqualToString:@"middle"])
+		{
+			_textAttachmentAlignment = DTTextAttachmentVerticalAlignmentCenter;
+		}
+		else if ([verticalAlignString isEqualToString:@"text-bottom"])
+		{
+			_textAttachmentAlignment = DTTextAttachmentVerticalAlignmentBottom;
+		}
+		else if ([verticalAlignString isEqualToString:@"baseline"])
+		{
+			_textAttachmentAlignment = DTTextAttachmentVerticalAlignmentBaseline;
+		}
+	}
 }
 
 - (void)parseStyleString:(NSString *)styleString
@@ -708,6 +781,7 @@
 
 - (void)removeChild:(DTHTMLElement *)child
 {
+	child.parent = nil;
 	[self.children removeObject:child];
 }
 
@@ -723,12 +797,12 @@
 
 - (BOOL)isContainedInBlockElement
 {
-	if (!parent || [parent isMeta] || !parent.tagName) // default tag has no tag name
+	if (!parent || !parent.tagName) // default tag has no tag name
 	{
 		return NO;
 	}
 	
-	if ([self.parent isInline])
+	if (self.parent.displayStyle == DTHTMLElementDisplayStyleInline)
 	{
 		return [self.parent isContainedInBlockElement];
 	}
@@ -839,26 +913,7 @@
 	return _fontCache;
 }
 
-- (BOOL)isInline
-{
-	if (_isInline<0)
-	{
-		_isInline = [tagName isInlineTag];
-	}
-	
-	return _isInline ? YES : NO;
-}
-
-- (BOOL)isMeta
-{
-	if (_isMeta<0)
-	{
-		_isMeta = [tagName isMetaTag];
-	}
-	
-	return _isMeta ? YES : NO;
-}
-- (void)setTextColor:(UIColor *)textColor
+- (void)setTextColor:(DTColor *)textColor
 {
 	if (_textColor != textColor)
 	{
@@ -990,6 +1045,12 @@
 	}
 }
 
+- (void)setTextAttachment:(DTTextAttachment *)textAttachment
+{
+	textAttachment.verticalAlignment = _textAttachmentAlignment;
+	_textAttachment = textAttachment;
+}
+
 
 @synthesize parent;
 @synthesize fontDescriptor;
@@ -1000,16 +1061,16 @@
 @synthesize text;
 @synthesize link;
 @synthesize underlineStyle;
-@synthesize textAttachment;
+@synthesize textAttachment = _textAttachment;
 @synthesize tagContentInvisible;
 @synthesize strikeOut;
 @synthesize superscriptStyle;
 @synthesize headerLevel;
 @synthesize shadows;
-@synthesize isInline;
 @synthesize floatStyle;
 @synthesize isColorInherited;
 @synthesize preserveNewlines;
+@synthesize displayStyle = _displayStyle;
 @synthesize fontVariant;
 @synthesize listStyle = _listStyle;
 @synthesize textScale;
