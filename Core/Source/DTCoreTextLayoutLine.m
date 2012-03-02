@@ -15,13 +15,9 @@
 @interface DTCoreTextLayoutLine ()
 
 @property (nonatomic, strong) NSArray *glyphRuns;
-@property (nonatomic, assign) dispatch_semaphore_t layoutLock;
+@property (nonatomic, copy) NSAttributedString *attributedString;
 
 @end
-
-#define SYNCHRONIZE_START(obj) dispatch_semaphore_wait(layoutLock, DISPATCH_TIME_FOREVER);
-#define SYNCHRONIZE_END(obj) dispatch_semaphore_signal(layoutLock);
-
 
 @implementation DTCoreTextLayoutLine
 {
@@ -40,11 +36,10 @@
 	NSArray *_glyphRuns;
 
 	BOOL _didCalculateMetrics;
+	dispatch_queue_t _syncQueue;
 }
 
-@synthesize layoutLock;
-
-- (id)initWithLine:(CTLineRef)line layoutFrame:(DTCoreTextLayoutFrame *)layoutFrame origin:(CGPoint)origin;
+- (id)initWithLine:(CTLineRef)line layoutFrame:(DTCoreTextLayoutFrame *)layoutFrame
 {
 	if ((self = [super init]))
 	{
@@ -52,10 +47,10 @@
 		CFRetain(_line);
 
 		NSAttributedString *globalString = [layoutFrame attributedStringFragment];
-		_attributedString = [[globalString attributedSubstringFromRange:[self stringRange]] copy];
+		self.attributedString = [globalString attributedSubstringFromRange:[self stringRange]];
 		
-		_baselineOrigin = origin;
-		layoutLock = dispatch_semaphore_create(1);
+		// get a global queue
+		_syncQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
 	}
 	return self;
 }
@@ -63,8 +58,6 @@
 - (void)dealloc
 {
 	CFRelease(_line);
-	
-	dispatch_release(layoutLock);
 }
 
 - (NSString *)description
@@ -93,9 +86,27 @@
 	return ret;
 }
 
+#pragma mark Creating Variants
+
+- (DTCoreTextLayoutLine *)justifiedLineWithFactor:(CGFloat)justificationFactor justificationWidth:(CGFloat)justificationWidth
+{
+	// make this line justified
+	CTLineRef justifiedLine = CTLineCreateJustifiedLine(_line, justificationFactor, justificationWidth);
+
+	DTCoreTextLayoutLine *newLine = [[DTCoreTextLayoutLine alloc] initWithLine:justifiedLine layoutFrame:nil];
+	
+	// we don't need the layout frame because we directly transfer a copy of the string
+	newLine.attributedString = _attributedString;
+	
+	CFRelease(justifiedLine);
+	
+	return newLine;
+}
+
 
 #pragma mark Calculations
-- (NSArray *)stringIndices {
+- (NSArray *)stringIndices 
+{
 	NSMutableArray *array = [NSMutableArray array];
 	for (DTCoreTextGlyphRun *oneRun in self.glyphRuns) {
 		[array addObjectsFromArray:[oneRun stringIndices]];
@@ -263,11 +274,9 @@
 	return didShift;
 }
 
-- (void)calculateMetrics
+- (void)_calculateMetrics
 {
-	// calculate metrics
-	SYNCHRONIZE_START(self)
-	{
+	dispatch_sync(_syncQueue, ^{
 		if (!_didCalculateMetrics)
 		{
 			width = (CGFloat)CTLineGetTypographicBounds(_line, &ascent, &descent, &leading);
@@ -275,8 +284,7 @@
 			
 			_didCalculateMetrics = YES;
 		}
-	}
-	SYNCHRONIZE_END(self);
+	});
 }
 
 // returns the maximum paragraph spacing for this line
@@ -314,7 +322,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	// take lineHeightMultiple into account
@@ -381,31 +389,134 @@
 	return maxLeading;
 }
 
+
+// returns line height if it is specified in any paragraph style in this line, zero if not specified
+- (CGFloat)calculatedLineHeight
+{
+	NSRange range = NSMakeRange(0, [_attributedString length]);
+	
+	__block float lineHeight = 0;
+	
+	[_attributedString enumerateAttribute:(id)kCTParagraphStyleAttributeName inRange:range options:NSAttributedStringEnumerationLongestEffectiveRangeNotRequired
+							   usingBlock:^(id value, NSRange range, BOOL *stop) {
+								   CTParagraphStyleRef paragraphStyle = (__bridge CTParagraphStyleRef)value;
+								   
+								   CGFloat minimumLineHeight = 0;
+								   CGFloat maximumLineHeight = 0;
+								   
+								   CTParagraphStyleGetValueForSpecifier(paragraphStyle, kCTParagraphStyleSpecifierMinimumLineHeight, sizeof(minimumLineHeight), &minimumLineHeight);
+								   CTParagraphStyleGetValueForSpecifier(paragraphStyle, kCTParagraphStyleSpecifierMaximumLineHeight, sizeof(maximumLineHeight), &maximumLineHeight);
+								   
+								   if (lineHeight<minimumLineHeight)
+								   {
+									   lineHeight = minimumLineHeight;
+								   }
+								   
+								   if (maximumLineHeight>0 && lineHeight>maximumLineHeight)
+								   {
+									   lineHeight = maximumLineHeight;
+								   }
+							   }];	
+	return lineHeight;
+}
+
+
+- (CGPoint)baselineOriginToPositionAfterLine:(DTCoreTextLayoutLine *)previousLine
+{
+	CGPoint lineOrigin = previousLine.baselineOrigin;
+
+	CTParagraphStyleRef paragraphStyle = (__bridge CTParagraphStyleRef)[_attributedString 
+																		attribute:(id)kCTParagraphStyleAttributeName
+																		atIndex:0 effectiveRange:NULL];
+	
+	// get line height in px if it is specified for this line
+	CGFloat lineHeight = 0;
+	CGFloat minLineHeight = 0;
+	CGFloat maxLineHeight = 0;
+	
+	CGFloat usedLeading = self.leading;
+	
+	if (usedLeading == 0.0f)
+	{
+		// font has no leading, so we fake one (e.g. Helvetica)
+		CGFloat tmpHeight = self.ascent + self.descent;
+		usedLeading = ceilf(0.2f * tmpHeight);
+		
+		if (usedLeading>20)
+		{
+			// we have a large image increasing the ascender too much for this calc to work
+			usedLeading = 0;
+		}
+	}
+	else
+	{
+		// make sure that we don't have less than 10% of line height as leading
+		usedLeading = ceilf(MAX((self.ascent + self.descent)*0.1f, usedLeading));
+	}
+	
+	if (CTParagraphStyleGetValueForSpecifier(paragraphStyle, kCTParagraphStyleSpecifierMinimumLineHeight, sizeof(minLineHeight), &minLineHeight))
+	{
+		if (lineHeight<minLineHeight)
+		{
+			lineHeight = minLineHeight;
+		}
+	}
+	
+	if (CTParagraphStyleGetValueForSpecifier(paragraphStyle, kCTParagraphStyleSpecifierMaximumLineHeight, sizeof(maxLineHeight), &maxLineHeight))
+	{
+		if (maxLineHeight>0 && lineHeight>maxLineHeight)
+		{
+			lineHeight = maxLineHeight;
+		}
+	}
+	
+	// get the correct baseline origin
+	if (lineHeight==0)
+	{
+		lineHeight = previousLine.descent + self.ascent;
+	}
+	
+	lineHeight += [previousLine paragraphSpacing:YES];
+	lineHeight += usedLeading;
+	
+	lineOrigin.y += lineHeight;
+
+	// preserve own baseline x
+	lineOrigin.x = _baselineOrigin.x;
+	
+	// origins are rounded
+	lineOrigin.y = roundf(lineOrigin.y);
+	
+	return lineOrigin;
+}
+
 #pragma mark Properties
 - (NSArray *)glyphRuns
 {
-	if (!_glyphRuns)
-	{
-		CFArrayRef runs = CTLineGetGlyphRuns(_line);
-		
-        if (runs) {
-		CGFloat offset = 0;
-		
-		NSMutableArray *tmpArray = [[NSMutableArray alloc] initWithCapacity:CFArrayGetCount(runs)];
-		
-		for (id oneRun in (__bridge NSArray *)runs)
+	dispatch_sync(_syncQueue, ^{
+		if (!_glyphRuns)
 		{
-			//CGPoint runOrigin = CGPointMake(_baselineOrigin.x + offset, _baselineOrigin.y);
+			// run array is owned by line
+			NSArray *runs = (__bridge NSArray *)CTLineGetGlyphRuns(_line);
 			
-			DTCoreTextGlyphRun *glyphRun = [[DTCoreTextGlyphRun alloc] initWithRun:(__bridge CTRunRef)oneRun layoutLine:self offset:offset];
-			[tmpArray addObject:glyphRun];
-			
-			offset += glyphRun.frame.size.width;
+			if (runs) 
+			{
+				CGFloat offset = 0;
+				
+				NSMutableArray *tmpArray = [[NSMutableArray alloc] initWithCapacity:[runs count]];
+				
+				for (id oneRun in runs)
+				{
+					DTCoreTextGlyphRun *glyphRun = [[DTCoreTextGlyphRun alloc] initWithRun:(__bridge CTRunRef)oneRun layoutLine:self offset:offset];
+					[tmpArray addObject:glyphRun];
+					
+					offset += glyphRun.frame.size.width;
+				}
+				
+				_glyphRuns = tmpArray;
+			}
 		}
-		
-		_glyphRuns = tmpArray;
-        }
-	}
+	});
 	
 	return _glyphRuns;
 }
@@ -414,7 +525,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	return CGRectMake(_baselineOrigin.x, _baselineOrigin.y - ascent, width, ascent + descent);
@@ -424,7 +535,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	return width;
@@ -434,7 +545,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	return ascent;
@@ -444,7 +555,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	return descent;
@@ -454,7 +565,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	return leading;
@@ -464,7 +575,7 @@
 {
 	if (!_didCalculateMetrics)
 	{
-		[self calculateMetrics];
+		[self _calculateMetrics];
 	}
 	
 	return trailingWhitespaceWidth;
@@ -480,5 +591,6 @@
 @synthesize trailingWhitespaceWidth;
 
 @synthesize baselineOrigin = _baselineOrigin;
+@synthesize attributedString = _attributedString;
 
 @end
