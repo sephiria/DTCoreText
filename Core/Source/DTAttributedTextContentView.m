@@ -51,6 +51,7 @@
 		unsigned int delegateSupportsCustomViewsForLinks:1;
 		unsigned int delegateSupportsGenericCustomViews:1;
 		unsigned int delegateSupportsNotificationAfterDrawing:1;
+		unsigned int delegateSupportsNotificationBeforeTextBoxDrawing:1;
 	} _delegateFlags;
 	
 	__unsafe_unretained id <DTAttributedTextContentViewDelegate> _delegate;
@@ -109,7 +110,13 @@ static Class _layerClassToUseForDTAttributedTextContentView = nil;
 	CATiledLayer *layer = (id)self.layer;
 	if ([layer isKindOfClass:[CATiledLayer class]])
 	{
-		CGSize tileSize = CGSizeMake(1024, 1024); // tiled layer reduzes with to fit
+		// get larger dimension and multiply by scale
+		UIScreen *mainScreen = [UIScreen mainScreen];
+		CGFloat largerDimension = MAX(mainScreen.applicationFrame.size.width, mainScreen.applicationFrame.size.height);
+		CGFloat scale = mainScreen.scale;
+		
+		// this way tiles cover entire screen regardless of orientation or scale
+		CGSize tileSize = CGSizeMake(largerDimension * scale, largerDimension * scale);
 		layer.tileSize = tileSize;
 		
 		_isTiling = YES;
@@ -657,6 +664,21 @@ static Class _layerClassToUseForDTAttributedTextContentView = nil;
 					rect.size.height = CGFLOAT_OPEN_HEIGHT; // necessary height set as soon as we know it.
 					
 					_layoutFrame = [theLayouter layoutFrameWithRect:rect range:NSMakeRange(0, 0)];
+					
+					if (_delegateFlags.delegateSupportsNotificationBeforeTextBoxDrawing)
+					{
+						DTAttributedTextContentView *weakself = self;
+						
+						[_layoutFrame setTextBlockHandler:^(DTTextBlock *textBlock, CGRect frame, CGContextRef context, BOOL *shouldDrawDefaultBackground) {
+							BOOL result = [weakself->_delegate attributedTextContentView:weakself shouldDrawBackgroundForTextBlock:textBlock frame:frame context:context forLayoutFrame:weakself->_layoutFrame];
+							
+							if (shouldDrawDefaultBackground)
+							{
+								*shouldDrawDefaultBackground = result;
+							}
+							
+						}];
+					}
 				}
 			}
 		}
@@ -723,6 +745,7 @@ static Class _layerClassToUseForDTAttributedTextContentView = nil;
 	_delegateFlags.delegateSupportsCustomViewsForLinks = [_delegate respondsToSelector:@selector(attributedTextContentView:viewForLink:identifier:frame:)];
 	_delegateFlags.delegateSupportsGenericCustomViews = [_delegate respondsToSelector:@selector(attributedTextContentView:viewForAttributedString:frame:)];
 	_delegateFlags.delegateSupportsNotificationAfterDrawing = [_delegate respondsToSelector:@selector(attributedTextContentView:didDrawLayoutFrame:inContext:)];
+	_delegateFlags.delegateSupportsNotificationBeforeTextBoxDrawing = [_delegate respondsToSelector:@selector(attributedTextContentView:shouldDrawBackgroundForTextBlock:frame:context:forLayoutFrame:)];
 	
 	if (!_delegateFlags.delegateSupportsCustomViewsForLinks && !_delegateFlags.delegateSupportsGenericCustomViews)
 	{
