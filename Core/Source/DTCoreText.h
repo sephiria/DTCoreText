@@ -4,21 +4,10 @@
 
 // global constants
 #import "DTCoreTextConstants.h"
+#import "DTCompatibility.h"
 
-// DTColor is UIColor on iOS, NSColor on Mac
 #import "DTColor+HTML.h"
-
-// DTImage is UIImage on iOS, NSImage on Mac
 #import "DTImage+HTML.h"
-
-// DTEdgeInsets is UIEdgeInsets on iOS, NSEdgeInsets on Mac
-#if TARGET_OS_IPHONE
-#define DTEdgeInsets UIEdgeInsets
-#define DTEdgeInsetsMake(a, b, c, d) UIEdgeInsetsMake(a, b, c, d)
-#else
-#define DTEdgeInsets NSEdgeInsets
-#define DTEdgeInsetsMake(a, b, c, d) NSEdgeInsetsMake(a, b, c, d)
-#endif
 
 // common utilities
 #import "CGUtils.h"
